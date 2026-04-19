@@ -5,14 +5,15 @@ from psycopg2.extras import RealDictCursor
 import os
 
 DB_URL = os.environ.get('DATABASE_URL')
+# Lấy worker_id từ môi trường GitHub Actions truyền vào
+WORKER_ID = os.environ.get('worker_id', '1')
 
 # --- HÀM 1: QUÉT TẤT CẢ LINKS TỪ TRANG DANH MỤC ---
 async def discover_links(page, url):
-    print(f"🔎 [DISCOVERY] Đang quét link từ danh mục: {url}")
+    print(f"🔎 [Worker {WORKER_ID}] Đang quét link từ danh mục: {url}")
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         found_links = set()
-        # Cuộn trang để load lazy content
         for i in range(15): 
             await page.mouse.wheel(0, 4000)
             await asyncio.sleep(2)
@@ -29,10 +30,10 @@ async def discover_links(page, url):
                 if btn: await btn.click(); await asyncio.sleep(2)
             except: pass
             
-        print(f"📊 [DISCOVERY] Tìm thấy tổng cộng: {len(found_links)} link sản phẩm.")
+        print(f"📊 [Worker {WORKER_ID}] Tìm thấy: {len(found_links)} link sản phẩm.")
         return list(found_links)
     except Exception as e:
-        print(f"❌ [DISCOVERY] Lỗi khi quét trang tổng {url}: {e}")
+        print(f"❌ [Worker {WORKER_ID}] Lỗi quét trang tổng: {e}")
         return []
 
 # --- HÀM 2: BÓC TÁCH CHI TIẾT SẢN PHẨM ---
@@ -73,52 +74,51 @@ async def scrape_product_detail(context, url):
         }''')
         return data
     except Exception as e:
-        print(f"❌ [SCRAPER] Lỗi cào chi tiết {url}: {e}")
+        print(f"❌ [Worker {WORKER_ID}] Lỗi cào chi tiết {url}: {e}")
         return None
     finally:
         await page.close()
 
 # --- HÀM CHÍNH ---
-# --- TRONG HÀM main() ---
-
 async def main():
     if not DB_URL: return print("❌ Lỗi: Thiếu DATABASE_URL")
     
-    # Lấy worker_id từ môi trường (GitHub Matrix truyền vào)
-    # Nếu chạy thủ công thì mặc định là 1
-    worker_id = os.environ.get('worker_id', '1')
-
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
 
-        conn = psycopg2.connect(DB_URL)
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        # 🚀 CHỈ CHO PHÉP WORKER SỐ 1 ĐI QUÉT LINK DANH MỤC
-        if worker_id == '1':
-            cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 1")
-            cat = cur.fetchone()
+        # BƯỚC 1: XỬ LÝ QUÉT DANH MỤC (CHỈ WORKER 1 LÀM)
+        if WORKER_ID == '1':
+            conn_temp = psycopg2.connect(DB_URL)
+            cur_temp = conn_temp.cursor(cursor_factory=RealDictCursor)
+            cur_temp.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 1")
+            cat = cur_temp.fetchone()
             
             if cat:
                 links = await discover_links(page, cat['url'])
                 if links:
-                    print(f"📥 [DB] Worker 1 đang nạp {len(links)} link mới...")
+                    print(f"📥 [Master] Worker 1 đang nạp {len(links)} link mới vào hàng đợi...")
                     for l in links:
-                        cur.execute("""
+                        cur_temp.execute("""
                             INSERT INTO products (url, category_name, status) 
                             VALUES (%s, %s, 'pending') 
                             ON CONFLICT (url) DO NOTHING
                         """, (l, cat['category_name']))
-                    cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
-                    conn.commit()
+                    cur_temp.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
+                    conn_temp.commit()
+            cur_temp.close()
+            conn_temp.close()
         else:
-            print(f"🤖 Worker {worker_id} bỏ qua bước quét danh mục, đi cào chi tiết ngay...")
+            # 🤖 CÁC WORKER PHỤ ĐỢI MASTER NẠP DỮ LIỆU
+            print(f"🤖 Worker {WORKER_ID} đang đợi Master (Worker 1) nạp dữ liệu vào Database...")
+            await asyncio.sleep(120) # Nghỉ 2 phút để hàng đợi có sẵn link
 
-        # --- BƯỚC 2: BỐC NHIỆM VỤ PHÂN TÁN (SKIP LOCKED) ---
-        # Mỗi Worker sẽ bốc 50 sản phẩm đang 'pending' hoặc bị kẹt hơn 30p
-        print("🤖 [WORKER] Đang bốc nhiệm vụ từ hàng đợi...")
+        # BƯỚC 2: TẤT CẢ CÙNG BỐC NHIỆM VỤ ĐỂ CÀO CHI TIẾT
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        print(f"🤖 [Worker {WORKER_ID}] Bắt đầu bốc nhiệm vụ từ hàng đợi...")
         cur.execute("""
             UPDATE products 
             SET status = 'processing', updated_at = NOW()
@@ -133,12 +133,10 @@ async def main():
             RETURNING id, url;
         """)
         jobs = cur.fetchall()
-        conn.commit() # Commit ngay để khóa các dòng này lại, không cho Bot khác bốc trùng
+        conn.commit() # Khóa ngay lập tức các dòng đã bốc
 
-        if not jobs:
-            print("📭 [WORKER] Hàng đợi trống. Không còn việc để làm.")
-        else:
-            print(f"🚀 [WORKER] Bắt đầu cào {len(jobs)} sản phẩm song song...")
+        if jobs:
+            print(f"🚀 [Worker {WORKER_ID}] Đang xử lý {len(jobs)} sản phẩm song song...")
             for job in jobs:
                 info = await scrape_product_detail(context, job['url'])
                 if info:
@@ -156,7 +154,9 @@ async def main():
                         info.get('kho_hang'), job['id']
                     ))
                     conn.commit()
-                    print(f"✅ [DONE] {info.get('product_name')}")
+                    print(f"✅ [Worker {WORKER_ID}] Hoàn thành: {info.get('product_name')}")
+        else:
+            print(f"📭 [Worker {WORKER_ID}] Hàng đợi trống. Không tìm thấy link để cào.")
 
         await browser.close()
         cur.close()
