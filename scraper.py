@@ -95,9 +95,17 @@ async def main():
                 await browser.close()
                 
                 if links:
-                    print(f"📥 [MASTER] Nạp {len(links)} link...")
-                    data_to_insert = [(l, cat['category_name'], 'pending') for l in links]
-                    execute_values(cur, "INSERT INTO products (url, category_name, status) VALUES %s ON CONFLICT (url) DO NOTHING", data_to_insert)
+                    print(f"📥 [MASTER] Nạp {len(links)} link mồi (Chia nhỏ để tránh Timeout)...")
+                    data = [(l, cat['category_name'], 'pending') for l in links]
+                    
+                    # Chia nhỏ data thành các nhóm 100 cái một
+                    batch_size = 100
+                    for i in range(0, len(data), batch_size):
+                        batch = data[i:i + batch_size]
+                        execute_values(cur, "INSERT INTO products (url, category_name, status) VALUES %s ON CONFLICT (url) DO NOTHING", batch)
+                        conn.commit() # Lưu ngay từng đợt
+                        print(f"✅ Đã nạp xong nhóm {i//batch_size + 1}")
+
                     cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
                     conn.commit()
         cur.close(); conn.close()
