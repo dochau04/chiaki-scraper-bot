@@ -1,9 +1,9 @@
 name: Chiaki Scraper Run
 
 on:
-  workflow_dispatch: # Giúp Châu có nút "Run workflow" để bấm chạy thử thủ công
   schedule:
-    - cron: '0 * * * *' # Tự động chạy mỗi tiếng một lần (24 lần/ngày)
+    - cron: '0 * * * *' # Tự chạy vào phút thứ 0 của mỗi giờ
+  workflow_dispatch:      # Vẫn giữ nút bấm tay khi cần
 
 jobs:
   run-bot:
