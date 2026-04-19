@@ -8,28 +8,32 @@ DB_URL = os.environ.get('DATABASE_URL')
 
 # --- HÀM 1: QUÉT TẤT CẢ LINKS TỪ TRANG DANH MỤC ---
 async def discover_links(page, url):
-    print(f"🔎 Đang quét link từ danh mục: {url}")
-    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    
-    found_links = set()
-    for i in range(20): 
-        await page.mouse.wheel(0, 4000)
-        await asyncio.sleep(2)
-        
-        new_links = await page.evaluate('''() => {
-            return Array.from(document.querySelectorAll('.product-item a, .item-product a'))
-                        .map(a => a.href)
-                        .filter(h => h.includes('chiaki.vn/') && !h.includes('tin-tuc'));
-        }''')
-        for l in new_links: found_links.add(l)
-        
-        try:
-            btn = await page.query_selector('text="Xem thêm"')
-            if btn: await btn.click(); await asyncio.sleep(2)
-        except: pass
-        
-    print(f"📊 Tổng cộng tìm thấy: {len(found_links)} link sản phẩm.")
-    return list(found_links)
+    print(f"🔎 [DISCOVERY] Đang quét link từ danh mục: {url}")
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        found_links = set()
+        # Cuộn trang để load lazy content
+        for i in range(15): 
+            await page.mouse.wheel(0, 4000)
+            await asyncio.sleep(2)
+            
+            new_links = await page.evaluate('''() => {
+                return Array.from(document.querySelectorAll('.product-item a, .item-product a'))
+                            .map(a => a.href)
+                            .filter(h => h.includes('chiaki.vn/') && !h.includes('tin-tuc'));
+            }''')
+            for l in new_links: found_links.add(l)
+            
+            try:
+                btn = await page.query_selector('text="Xem thêm"')
+                if btn: await btn.click(); await asyncio.sleep(2)
+            except: pass
+            
+        print(f"📊 [DISCOVERY] Tìm thấy tổng cộng: {len(found_links)} link sản phẩm.")
+        return list(found_links)
+    except Exception as e:
+        print(f"❌ [DISCOVERY] Lỗi khi quét trang tổng {url}: {e}")
+        return []
 
 # --- HÀM 2: BÓC TÁCH CHI TIẾT SẢN PHẨM ---
 async def scrape_product_detail(context, url):
@@ -43,20 +47,15 @@ async def scrape_product_detail(context, url):
             const getT = (sel) => document.querySelector(sel)?.innerText.trim() || 'N/A';
             let res = {};
             
-            // ẢNH SẢN PHẨM
             let imgEl = document.querySelector('.product-img-main') || 
                         document.querySelector('.lg-item img') ||
                         document.querySelector('#product-image-feature');
             res.image_link = imgEl ? imgEl.getAttribute('src') : 'N/A';
 
-            // TÊN
             res.product_name = getT('h1') || getT('.title-product');
-
-            // GIÁ
             res.price_sale = document.querySelector('#price-show')?.innerText.replace(/[^0-9]/g, '') || 0;
             res.price_market = document.querySelector('#sale-price-show')?.innerText.replace(/[^0-9]/g, '') || res.price_sale;
             
-            // THÔNG SỐ ROW (Thương hiệu, Xuất xứ, Kho, Tồn kho)
             document.querySelectorAll('.product-specs-row').forEach(row => {
                 let lbl = row.querySelector('.product-specs-label')?.innerText.trim();
                 let val = row.querySelector('.product-specs-value')?.innerText.trim();
@@ -66,98 +65,90 @@ async def scrape_product_detail(context, url):
                 if (lbl === 'Kho hàng tại') res.kho_hang = val;
             });
 
-            // ĐÃ BÁN
             let soldEl = document.querySelector('.item-sold .item-count') || document.querySelector('.item-count');
             res.sold = soldEl ? soldEl.innerText.replace(/[^0-9]/g, '') : 0;
-
-            // MÔ TẢ
             res.description = document.querySelector('#content-product')?.innerText.trim() || 'N/A';
             
             return res;
         }''')
         return data
     except Exception as e:
-        print(f"❌ Lỗi link {url}: {e}")
+        print(f"❌ [SCRAPER] Lỗi cào chi tiết {url}: {e}")
         return None
     finally:
         await page.close()
 
 # --- HÀM CHÍNH ---
 async def main():
-    if not DB_URL: return print("❌ Thiếu DATABASE_URL")
+    if not DB_URL: return print("❌ Lỗi: Thiếu DATABASE_URL trong Environment Secrets")
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
 
-        # Mở kết nối tạm để lấy 1 danh mục
-        temp_conn = psycopg2.connect(DB_URL)
-        temp_cur = temp_conn.cursor(cursor_factory=RealDictCursor)
-        temp_cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 1")
-        cat = temp_cur.fetchone()
-        temp_conn.close() 
-
-        product_links = []
-        if cat:
-            product_links = await discover_links(page, cat['url']) 
-        
-        # MỞ KẾT NỐI LẠI ĐỂ LƯU DỮ LIỆU
+        # --- BƯỚC 1: PHÂN PHỐI LINK DANH MỤC ---
+        # (Chỉ lấy 1 danh mục để quét link sản phẩm)
         conn = psycopg2.connect(DB_URL)
         cur = conn.cursor(cursor_factory=RealDictCursor)
-
-        if cat and product_links:
-            print(f"📥 Đang nạp {len(product_links)} link vào Database...")
-            for link in product_links:
-                cur.execute("""
-                    INSERT INTO products (url, category_name, status) 
-                    VALUES (%s, %s, 'pending') 
-                    ON CONFLICT (url) DO NOTHING
-                """, (link, cat['category_name']))
-            
-            cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
-            conn.commit()
-
-        # CÀO CHI TIẾT 20 SP
-        cur.execute("SELECT id, url FROM products WHERE status = 'pending' LIMIT 20")
-        jobs = cur.fetchall()
         
-        for job in jobs:
-            print(f"🚀 Đang cào chi tiết: {job['url']}")
-            info = await scrape_product_detail(context, job['url'])
-            
-            if info:
-                # ĐÃ ĐỒNG BỘ TÊN KEY VỚI HÀM SCRAPE Ở TRÊN
-                cur.execute("""
-                    UPDATE products SET 
-                    product_name = %s, 
-                    price_sale = %s, 
-                    price_market = %s, 
-                    image_link = %s, 
-                    brand = %s, 
-                    origin = %s, 
-                    stock = %s, 
-                    sold = %s, 
-                    description = %s, 
-                    kho_hang = %s,
-                    status = 'completed', 
-                    updated_at = NOW() 
-                    WHERE id = %s
-                """, (
-                    info.get('product_name'),
-                    info.get('price_sale'),
-                    info.get('price_market'),
-                    info.get('image_link'),   # Đã sửa từ 'Link ảnh' thành 'image_link'
-                    info.get('brand'),        # Đã sửa từ 'Thương hiệu' thành 'brand'
-                    info.get('origin'),       # Đã sửa từ 'Xuất xứ' thành 'origin'
-                    info.get('stock', 0),     # Đã sửa từ 'Sản phẩm còn lại' thành 'stock'
-                    info.get('sold', 0),      # Đã sửa từ 'Đã bán' thành 'sold'
-                    info.get('description'),  # Đã sửa từ 'Mô tả' thành 'description'
-                    info.get('kho_hang'),     # Đã sửa từ 'Kho hàng tại' thành 'kho_hang'
-                    job['id']
-                ))
+        cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 1")
+        cat = cur.fetchone()
+        
+        if cat:
+            links = await discover_links(page, cat['url'])
+            if links:
+                print(f"📥 [DB] Đang nạp {len(links)} link mới vào bảng products...")
+                for l in links:
+                    cur.execute("""
+                        INSERT INTO products (url, category_name, status) 
+                        VALUES (%s, %s, 'pending') 
+                        ON CONFLICT (url) DO NOTHING
+                    """, (l, cat['category_name']))
+                cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
                 conn.commit()
-                print(f"✅ Đã cập nhật chuẩn: {info.get('product_name')}")
+
+        # --- BƯỚC 2: BỐC NHIỆM VỤ PHÂN TÁN (SKIP LOCKED) ---
+        # Mỗi Worker sẽ bốc 50 sản phẩm đang 'pending' hoặc bị kẹt hơn 30p
+        print("🤖 [WORKER] Đang bốc nhiệm vụ từ hàng đợi...")
+        cur.execute("""
+            UPDATE products 
+            SET status = 'processing', updated_at = NOW()
+            WHERE id IN (
+                SELECT id FROM products 
+                WHERE status = 'pending' 
+                OR (status = 'processing' AND updated_at < NOW() - INTERVAL '30 minutes')
+                ORDER BY updated_at ASC NULLS FIRST 
+                LIMIT 50 
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id, url;
+        """)
+        jobs = cur.fetchall()
+        conn.commit() # Commit ngay để khóa các dòng này lại, không cho Bot khác bốc trùng
+
+        if not jobs:
+            print("📭 [WORKER] Hàng đợi trống. Không còn việc để làm.")
+        else:
+            print(f"🚀 [WORKER] Bắt đầu cào {len(jobs)} sản phẩm song song...")
+            for job in jobs:
+                info = await scrape_product_detail(context, job['url'])
+                if info:
+                    cur.execute("""
+                        UPDATE products SET 
+                        product_name = %s, price_sale = %s, price_market = %s, 
+                        image_link = %s, brand = %s, origin = %s, stock = %s, 
+                        sold = %s, description = %s, kho_hang = %s,
+                        status = 'completed', updated_at = NOW() 
+                        WHERE id = %s
+                    """, (
+                        info.get('product_name'), info.get('price_sale'), info.get('price_market'),
+                        info.get('image_link'), info.get('brand'), info.get('origin'),
+                        info.get('stock', 0), info.get('sold', 0), info.get('description'),
+                        info.get('kho_hang'), job['id']
+                    ))
+                    conn.commit()
+                    print(f"✅ [DONE] {info.get('product_name')}")
 
         await browser.close()
         cur.close()
