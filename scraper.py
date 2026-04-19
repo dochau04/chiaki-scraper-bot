@@ -79,34 +79,42 @@ async def scrape_product_detail(context, url):
         await page.close()
 
 # --- HÀM CHÍNH ---
+# --- TRONG HÀM main() ---
+
 async def main():
-    if not DB_URL: return print("❌ Lỗi: Thiếu DATABASE_URL trong Environment Secrets")
+    if not DB_URL: return print("❌ Lỗi: Thiếu DATABASE_URL")
     
+    # Lấy worker_id từ môi trường (GitHub Matrix truyền vào)
+    # Nếu chạy thủ công thì mặc định là 1
+    worker_id = os.environ.get('worker_id', '1')
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
 
-        # --- BƯỚC 1: PHÂN PHỐI LINK DANH MỤC ---
-        # (Chỉ lấy 1 danh mục để quét link sản phẩm)
         conn = psycopg2.connect(DB_URL)
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 1")
-        cat = cur.fetchone()
-        
-        if cat:
-            links = await discover_links(page, cat['url'])
-            if links:
-                print(f"📥 [DB] Đang nạp {len(links)} link mới vào bảng products...")
-                for l in links:
-                    cur.execute("""
-                        INSERT INTO products (url, category_name, status) 
-                        VALUES (%s, %s, 'pending') 
-                        ON CONFLICT (url) DO NOTHING
-                    """, (l, cat['category_name']))
-                cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
-                conn.commit()
+
+        # 🚀 CHỈ CHO PHÉP WORKER SỐ 1 ĐI QUÉT LINK DANH MỤC
+        if worker_id == '1':
+            cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 1")
+            cat = cur.fetchone()
+            
+            if cat:
+                links = await discover_links(page, cat['url'])
+                if links:
+                    print(f"📥 [DB] Worker 1 đang nạp {len(links)} link mới...")
+                    for l in links:
+                        cur.execute("""
+                            INSERT INTO products (url, category_name, status) 
+                            VALUES (%s, %s, 'pending') 
+                            ON CONFLICT (url) DO NOTHING
+                        """, (l, cat['category_name']))
+                    cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
+                    conn.commit()
+        else:
+            print(f"🤖 Worker {worker_id} bỏ qua bước quét danh mục, đi cào chi tiết ngay...")
 
         # --- BƯỚC 2: BỐC NHIỆM VỤ PHÂN TÁN (SKIP LOCKED) ---
         # Mỗi Worker sẽ bốc 50 sản phẩm đang 'pending' hoặc bị kẹt hơn 30p
