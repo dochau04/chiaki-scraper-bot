@@ -40,21 +40,30 @@ async def main():
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(user_agent="Mozilla/5.0...")
+        context = await browser.new_context()
         page = await context.new_page()
 
-        # KIỂM TRA XEM CẦN QUÉT LINK MỚI KHÔNG
-        cur.execute("SELECT count(*) FROM products")
-        count = cur.fetchone()['count']
+        # 1. LẤY MỘT DANH MỤC ĐỂ QUÉT LINK SẢN PHẨM
+        cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 1")
+        cat = cur.fetchone()
         
-        if count < 10: # Nếu database gần như trống, đi quét link trước
-            links = await discover_links(page)
-            for l in links:
-                cur.execute("INSERT INTO products (url, status) VALUES (%s, 'pending') ON CONFLICT (url) DO NOTHING", (l,))
+        if cat:
+            print(f"📂 Đang quét danh mục: {cat['category_name']}")
+            product_links = await discover_links(page, cat['url']) # Dùng hàm quét link đã có
+            
+            for link in product_links:
+                cur.execute("""
+                    INSERT INTO products (url, category_name, status) 
+                    VALUES (%s, %s, 'pending') 
+                    ON CONFLICT (url) DO NOTHING
+                """, (link, cat['category_name']))
+            
+            # Cập nhật thời gian vừa quét danh mục này xong
+            cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
             conn.commit()
 
-        # BẮT ĐẦU CÀO CHI TIẾT (Mỗi lần chạy cào 50 sản phẩm để tránh quá tải)
-        cur.execute("SELECT id, url FROM products WHERE status = 'pending' LIMIT 50")
+        # 2. SAU ĐÓ CÀO CHI TIẾT NHƯ BÌNH THƯỜNG
+        cur.execute("SELECT id, url FROM products WHERE status = 'pending' LIMIT 20")
         jobs = cur.fetchall()
         
         for job in jobs:
