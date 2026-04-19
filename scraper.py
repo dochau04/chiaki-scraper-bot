@@ -5,16 +5,16 @@ from psycopg2.extras import RealDictCursor
 import os
 
 DB_URL = os.environ.get('DATABASE_URL')
-CATEGORY_URL = "https://chiaki.vn/my-pham"
 
-# Hàm lấy link từ trang danh mục (Hỗ trợ cuộn trang sâu)
-async def discover_links(page, target=50000):
-    print(f"🔎 Đang quét link từ: {CATEGORY_URL}")
-    await page.goto(CATEGORY_URL, wait_until="domcontentloaded", timeout=60000)
+# --- HÀM 1: QUÉT TẤT CẢ LINKS TỪ TRANG DANH MỤC ---
+async def discover_links(page, url):
+    print(f"🔎 Đang quét link từ danh mục: {url}")
+    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
     
     found_links = set()
-    for _ in range(50): # Cuộn trang 50 lần để load thêm sản phẩm
-        await page.mouse.wheel(0, 5000)
+    # Cuộn trang 20 lần để load link (có thể tăng lên nếu danh mục quá dài)
+    for i in range(20): 
+        await page.mouse.wheel(0, 4000)
         await asyncio.sleep(2)
         
         new_links = await page.evaluate('''() => {
@@ -23,18 +23,52 @@ async def discover_links(page, target=50000):
                         .filter(h => h.includes('chiaki.vn/') && !h.includes('tin-tuc'));
         }''')
         for l in new_links: found_links.add(l)
-        print(f"📊 Đã tìm thấy: {len(found_links)} links")
         
-        # Thử click nút xem thêm nếu có
+        # Click "Xem thêm" nếu có để lấy thêm link
         try:
             btn = await page.query_selector('text="Xem thêm"')
-            if btn: await btn.click()
+            if btn: await btn.click(); await asyncio.sleep(2)
         except: pass
         
-        if len(found_links) >= target: break
+    print(f"📊 Tổng cộng tìm thấy: {len(found_links)} link sản phẩm.")
     return list(found_links)
 
+# --- HÀM 2: BÓC TÁCH CHI TIẾT SẢN PHẨM ---
+async def scrape_product_detail(context, url):
+    page = await context.new_page()
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        await page.mouse.wheel(0, 800)
+        await asyncio.sleep(2)
+
+        data = await page.evaluate('''() => {
+            const getT = (sel) => document.querySelector(sel)?.innerText.trim() || 'N/A';
+            let res = {};
+            let imgEl = document.querySelector('.product-img-main') || document.querySelector('.lg-item img');
+            res.image_link = imgEl ? imgEl.getAttribute('src') : 'N/A';
+            res.product_name = getT('h1') || getT('.title-product');
+            res.price_sale = document.querySelector('#price-show')?.innerText.replace(/[^0-9]/g, '') || 0;
+            res.price_market = document.querySelector('#sale-price-show')?.innerText.replace(/[^0-9]/g, '') || res.price_sale;
+            
+            document.querySelectorAll('.product-specs-row').forEach(row => {
+                let lbl = row.querySelector('.product-specs-label')?.innerText.trim();
+                let val = row.querySelector('.product-specs-value')?.innerText.trim();
+                if (lbl === 'Thương hiệu') res.brand = val;
+                if (lbl === 'Xuất xứ') res.origin = val;
+            });
+            res.description = document.querySelector('#content-product')?.innerText.trim() || 'N/A';
+            return res;
+        }''')
+        return data
+    except Exception as e:
+        print(f"❌ Lỗi link {url}: {e}")
+        return None
+    finally:
+        await page.close()
+
+# --- HÀM CHÍNH ---
 async def main():
+    if not DB_URL: return print("❌ Thiếu DATABASE_URL")
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor(cursor_factory=RealDictCursor)
     
@@ -43,13 +77,13 @@ async def main():
         context = await browser.new_context()
         page = await context.new_page()
 
-        # 1. LẤY MỘT DANH MỤC ĐỂ QUÉT LINK SẢN PHẨM
+        # 1. LẤY MỘT DANH MỤC TRONG BẢNG CATEGORIES (Quay vòng)
         cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 1")
         cat = cur.fetchone()
         
         if cat:
-            print(f"📂 Đang quét danh mục: {cat['category_name']}")
-            product_links = await discover_links(page, cat['url']) # Dùng hàm quét link đã có
+            # Truyền cat['url'] vào thay vì link cố định
+            product_links = await discover_links(page, cat['url']) 
             
             for link in product_links:
                 cur.execute("""
@@ -58,25 +92,29 @@ async def main():
                     ON CONFLICT (url) DO NOTHING
                 """, (link, cat['category_name']))
             
-            # Cập nhật thời gian vừa quét danh mục này xong
             cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
             conn.commit()
 
-        # 2. SAU ĐÓ CÀO CHI TIẾT NHƯ BÌNH THƯỜNG
+        # 2. CÀO CHI TIẾT 20 SẢN PHẨM ĐANG ĐỢI (PENDING)
         cur.execute("SELECT id, url FROM products WHERE status = 'pending' LIMIT 20")
         jobs = cur.fetchall()
         
         for job in jobs:
-            try:
-                print(f"🚀 Cào SP: {job['url']}")
-                # Chỗ này dùng hàm scrape_product_detail đã viết ở trên của bạn
-                # (Lưu ý: Để tiết kiệm dung lượng, mình tóm lược logic cập nhật)
-                # ... [Code trích xuất dữ liệu của bạn] ...
-                
-                # Cập nhật kết quả
-                cur.execute("UPDATE products SET status = 'completed', updated_at = NOW() WHERE id = %s", (job['id'],))
+            print(f"🚀 Đang cào chi tiết: {job['url']}")
+            info = await scrape_product_detail(context, job['url'])
+            
+            if info:
+                cur.execute("""
+                    UPDATE products SET 
+                    product_name = %s, price_sale = %s, price_market = %s, 
+                    image_link = %s, brand = %s, origin = %s, description = %s,
+                    status = 'completed', updated_at = NOW() 
+                    WHERE id = %s
+                """, (info['product_name'], info['price_sale'], info['price_market'],
+                      info['image_link'], info.get('brand', 'N/A'), info.get('origin', 'N/A'), 
+                      info['description'], job['id']))
                 conn.commit()
-            except: continue
+                print(f"✅ Đã lưu: {info['product_name']}")
 
         await browser.close()
     conn.close()
