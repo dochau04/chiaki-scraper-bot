@@ -2,19 +2,21 @@ name: Chiaki Distributed Scraper
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Cứ 30 phút chạy 1 lần
-  workflow_dispatch:
+    - cron: '*/30 * * * *' # Tự động chạy mỗi 30 phút
+  workflow_dispatch:      # Nút bấm chạy thủ công
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false # Nếu 1 máy lỗi, các máy khác vẫn chạy tiếp
+      fail-fast: false    # Quan trọng: Một máy lỗi các máy khác vẫn chạy bình thường
       matrix:
-        worker_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] # 10 con chạy song song
+        worker_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] # Khởi tạo 10 máy ảo song song
     
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -28,4 +30,5 @@ jobs:
       - name: Run Scraper
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          worker_id: ${{ matrix.worker_id }} # Truyền ID máy ảo vào code Python
         run: python scraper.py
