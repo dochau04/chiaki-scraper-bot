@@ -1,0 +1,29 @@
+name: Chiaki Scraper Run
+
+on:
+  workflow_dispatch: # Giúp Châu có nút "Run workflow" để bấm chạy thử thủ công
+  schedule:
+    - cron: '0 * * * *' # Tự động chạy mỗi tiếng một lần (24 lần/ngày)
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install playwright psycopg2-binary
+          playwright install chromium
+          playwright install-deps
+
+      - name: Run Scraper Bot
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scraper.py
