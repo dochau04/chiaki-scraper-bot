@@ -113,17 +113,37 @@ async def main():
             info = await scrape_product_detail(context, job['url'])
             
             if info:
+                # Đảm bảo các biến được truyền vào đúng thứ tự với các cột trong Database
                 cur.execute("""
                     UPDATE products SET 
-                    product_name = %s, price_sale = %s, price_market = %s, 
-                    image_link = %s, brand = %s, origin = %s, description = %s,
-                    status = 'completed', updated_at = NOW() 
+                    product_name = %s, 
+                    price_sale = %s, 
+                    price_market = %s, 
+                    image_link = %s, 
+                    brand = %s, 
+                    origin = %s, 
+                    stock = %s, 
+                    sold = %s, 
+                    description = %s, 
+                    kho_hang = %s,
+                    status = 'completed', 
+                    updated_at = NOW() 
                     WHERE id = %s
-                """, (info['product_name'], info['price_sale'], info['price_market'],
-                      info['image_link'], info.get('brand', 'N/A'), info.get('origin', 'N/A'), 
-                      info['description'], job['id']))
+                """, (
+                    info.get('product_name'),      # %s thứ 1
+                    info.get('price_sale'),      # %s thứ 2
+                    info.get('price_market'),    # %s thứ 3
+                    info.get('Link ảnh'),        # %s thứ 4 (tên key theo code của bạn)
+                    info.get('Thương hiệu'),     # %s thứ 5
+                    info.get('Xuất xứ'),        # %s thứ 6
+                    info.get('Sản phẩm còn lại'),# %s thứ 7 -> Cột stock
+                    info.get('Đã bán'),          # %s thứ 8 -> Cột sold
+                    info.get('Mô tả'),           # %s thứ 9
+                    info.get('Kho hàng tại'),    # %s thứ 10
+                    job['id']                    # WHERE id = %s
+                ))
                 conn.commit()
-                print(f"✅ Đã lưu: {info['product_name']}")
+                print(f"✅ Đã cập nhật chuẩn: {info.get('product_name')}")
 
         await browser.close()
         cur.close()
