@@ -52,8 +52,9 @@ async def scrape_product_detail(context, url):
 async def main():
     if not DB_URL: return
     
-    # --- BƯỚC 1: WORKER 1 NẠP DỮ LIỆU (NHANH GỌN) ---
+    # --- BƯỚC 1: PHÂN CHIA VAI TRÒ ---
     if WORKER_ID == '1':
+        # VAI TRÒ MASTER: CHỈ QUÉT LINK
         conn = psycopg2.connect(DB_URL)
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC LIMIT 1")
@@ -67,56 +68,57 @@ async def main():
                 await browser.close()
                 
                 if links:
-                    print(f"📥 [MASTER] Đang nạp {len(links)} link bằng Batch Insert...")
-                    # Kỹ thuật Batch Insert để tránh Deadlock
+                    print(f"📥 [MASTER] Nạp {len(links)} link. Giải phóng DB ngay...")
                     data_to_insert = [(l, cat['category_name'], 'pending') for l in links]
-                    execute_values(cur, """
-                        INSERT INTO products (url, category_name, status) 
-                        VALUES %s ON CONFLICT (url) DO NOTHING
-                    """, data_to_insert)
-                    
+                    execute_values(cur, "INSERT INTO products (url, category_name, status) VALUES %s ON CONFLICT (url) DO NOTHING", data_to_insert)
                     cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
                     conn.commit()
         cur.close()
         conn.close()
-        print("✅ [MASTER] Đã nạp xong và giải phóng Database.")
+        print("🏁 [MASTER] Đã hoàn thành nhiệm vụ rải link. Kết thúc.")
+        return # Worker 1 làm xong thì nghỉ luôn, không cào để nhường chỗ cho con khác
+
     else:
-        print(f"⏳ [WORKER {WORKER_ID}] Đợi Master nạp hàng (180s)...")
-        await asyncio.sleep(180)
+        # VAI TRÒ WORKER (CON 2 ĐẾN 10): CHỈ CÀO CHI TIẾT
+        # Tăng thời gian đợi lên 300s (5 phút) để Master kịp quét 25 lần cuộn chuột
+        print(f"⏳ [WORKER {WORKER_ID}] Đợi Master nạp hàng (300s)...")
+        await asyncio.sleep(300)
 
-    # --- BƯỚC 2: TẤT CẢ WORKERS CÀO CHI TIẾT ---
-    conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    
-    cur.execute("""
-        UPDATE products SET status = 'processing', updated_at = NOW()
-        WHERE id IN (
-            SELECT id FROM products WHERE status = 'pending' 
-            ORDER BY id ASC LIMIT 50 FOR UPDATE SKIP LOCKED
-        ) RETURNING id, url;
-    """)
-    jobs = cur.fetchall()
-    conn.commit()
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Bốc 50 hoặc 100 dòng tùy bạn
+        cur.execute("""
+            UPDATE products SET status = 'processing', updated_at = NOW()
+            WHERE id IN (
+                SELECT id FROM products WHERE status = 'pending' 
+                ORDER BY id ASC LIMIT 100 FOR UPDATE SKIP LOCKED
+            ) RETURNING id, url;
+        """)
+        jobs = cur.fetchall()
+        conn.commit()
 
-    if jobs:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context()
-            print(f"🚀 [WORKER {WORKER_ID}] Nhận {len(jobs)} việc.")
-            for job in jobs:
-                info = await scrape_product_detail(context, job['url'])
-                if info:
-                    cur.execute("""
-                        UPDATE products SET product_name = %s, price_sale = %s, price_market = %s, 
-                        image_link = %s, description = %s, status = 'completed', updated_at = NOW() 
-                        WHERE id = %s
-                    """, (info['product_name'], info['price_sale'], info['price_market'],
-                          info['image_link'], info['description'], job['id']))
-                    conn.commit()
-            await browser.close()
-    
-    cur.close()
-    conn.close()
+        if jobs:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context()
+                print(f"🚀 [WORKER {WORKER_ID}] Nhận {len(jobs)} việc.")
+                for job in jobs:
+                    info = await scrape_product_detail(context, job['url'])
+                    if info:
+                        cur.execute("""
+                            UPDATE products SET product_name = %s, price_sale = %s, price_market = %s, 
+                            image_link = %s, description = %s, status = 'completed', updated_at = NOW() 
+                            WHERE id = %s
+                        """, (info['product_name'], info['price_sale'], info['price_market'],
+                              info['image_link'], info['description'], job['id']))
+                        conn.commit()
+                await browser.close()
+        else:
+            print(f"📭 [WORKER {WORKER_ID}] Không tìm thấy việc (Master nạp chưa xong hoặc kho đã hết).")
+        
+        cur.close()
+        conn.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
