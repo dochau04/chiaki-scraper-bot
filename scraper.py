@@ -8,18 +8,20 @@ import time
 DB_URL = os.environ.get('DATABASE_URL')
 WORKER_ID = os.environ.get('worker_id', '1')
 START_TIME = time.time()
-MAX_RUNTIME = 5.5 * 3600  # Chạy tối đa 5.5 tiếng
+MAX_RUNTIME = 5.5 * 3600  # Chạy tối đa 5.5 tiếng để an toàn
 
+# --- HÀM QUÉT LINK ---
 async def discover_links(page, url):
     print(f"🔎 [MASTER] Đang quét link từ: {url}")
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         found_links = set()
-        for i in range(30):
+        for i in range(25): 
             await page.mouse.wheel(0, 4000)
             await asyncio.sleep(2)
             new_links = await page.evaluate('''() => {
-                return Array.from(document.querySelectorAll('.product-item a, .item-product a')).map(a => a.href)
+                return Array.from(document.querySelectorAll('.product-item a, .item-product a'))
+                            .map(a => a.href)
                             .filter(h => h.includes('chiaki.vn/') && !h.includes('tin-tuc'));
             }''')
             for l in new_links: found_links.add(l)
@@ -27,11 +29,13 @@ async def discover_links(page, url):
                 btn = await page.query_selector('text="Xem thêm"')
                 if btn: await btn.click()
             except: pass
+            if len(found_links) >= 1000: break
         return list(found_links)
     except Exception as e:
         print(f"❌ Lỗi quét link: {e}")
         return []
 
+# --- HÀM CÀO CHI TIẾT (ĐÃ ĐỒNG BỘ KEY) ---
 async def scrape_product_detail(context, url):
     page = await context.new_page()
     try:
@@ -43,20 +47,17 @@ async def scrape_product_detail(context, url):
             const getT = (sel) => document.querySelector(sel)?.innerText.trim() || 'N/A';
             let res = {};
 
-            // 1. ẢNH SẢN PHẨM
+            // Đặt tên Key tiếng Anh để khớp với SQL
             let imgEl = document.querySelector('.product-img-main') || 
                         document.querySelector('.lg-item img') ||
                         document.querySelector('#product-image-feature');
             res.image_link = imgEl ? imgEl.getAttribute('src') : 'N/A';
 
-            // 2. TÊN
             res.product_name = getT('h1') || getT('.title-product');
 
-            // 3. GIÁ (Chỉ lấy số)
             res.price_sale = document.querySelector('#price-show')?.innerText.replace(/[^0-9]/g, '') || 0;
             res.price_market = document.querySelector('#sale-price-show')?.innerText.replace(/[^0-9]/g, '') || res.price_sale;
 
-            // 4. THÔNG SỐ ROW (Thương hiệu, Xuất xứ, Kho, Tồn kho)
             document.querySelectorAll('.product-specs-row').forEach(row => {
                 let lbl = row.querySelector('.product-specs-label')?.innerText.trim();
                 let val = row.querySelector('.product-specs-value')?.innerText.trim();
@@ -66,7 +67,6 @@ async def scrape_product_detail(context, url):
                 if (lbl === 'Kho hàng tại') res.kho_hang = val;
             });
 
-            // 5. ĐÃ BÁN & MÔ TẢ
             let soldEl = document.querySelector('.item-sold .item-count') || document.querySelector('.item-count');
             res.sold = soldEl ? soldEl.innerText.replace(/[^0-9]/g, '') : 0;
             res.description = document.querySelector('#content-product')?.innerText.trim() || 'N/A';
@@ -74,39 +74,37 @@ async def scrape_product_detail(context, url):
             return res;
         }''')
         return data
-    except Exception as e:
-        print(f"❌ Lỗi cào {url}: {e}")
-        return None
-    finally:
-        await page.close()
+    except: return None
+    finally: await page.close()
 
 async def main():
     if not DB_URL: return
-
+    
     # --- BƯỚC 1: MASTER NẠP MỒI ---
     if WORKER_ID == '1':
         conn = psycopg2.connect(DB_URL)
         cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC LIMIT 1")
         cat = cur.fetchone()
+        
         if cat:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
                 page = await browser.new_page()
                 links = await discover_links(page, cat['url'])
+                await browser.close()
+                
                 if links:
-                    print(f"📥 [MASTER] Nạp {len(links)} link mồi...")
-                    data = [(l, cat['category_name'], 'pending') for l in links]
-                    execute_values(cur, "INSERT INTO products (url, category_name, status) VALUES %s ON CONFLICT (url) DO NOTHING", data)
+                    print(f"📥 [MASTER] Nạp {len(links)} link...")
+                    data_to_insert = [(l, cat['category_name'], 'pending') for l in links]
+                    execute_values(cur, "INSERT INTO products (url, category_name, status) VALUES %s ON CONFLICT (url) DO NOTHING", data_to_insert)
                     cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
                     conn.commit()
-                await browser.close()
         cur.close(); conn.close()
-        print("🏁 [MASTER] Hoàn tất rải link.")
         return
 
-    # --- BƯỚC 2: WORKER CÀO LIÊN TỤC ---
-    print(f"⏳ [WORKER {WORKER_ID}] Đang chờ Master 5 phút...")
+    # --- BƯỚC 2: WORKER CÀO LIÊN TỤC (VÒNG LẶP) ---
+    print(f"⏳ [WORKER {WORKER_ID}] Đợi Master 5 phút...")
     await asyncio.sleep(300)
 
     async with async_playwright() as p:
@@ -128,14 +126,13 @@ async def main():
             conn.commit()
 
             if not jobs:
-                print(f"📭 [WORKER {WORKER_ID}] Hết việc, dừng sớm.")
+                print(f"📭 [WORKER {WORKER_ID}] Hết việc.")
                 cur.close(); conn.close()
                 break
 
             for job in jobs:
                 info = await scrape_product_detail(context, job['url'])
                 if info:
-                    # ĐỒNG BỘ CÁC TRƯỜNG DỮ LIỆU Ở ĐÂY
                     cur.execute("""
                         UPDATE products SET 
                         product_name = %s, price_sale = %s, price_market = %s, 
@@ -152,7 +149,7 @@ async def main():
                     conn.commit()
             
             cur.close(); conn.close()
-            print(f"✅ [WORKER {WORKER_ID}] Đã xong thêm 20 sản phẩm...")
+            print(f"✅ [WORKER {WORKER_ID}] Xong 1 đợt 20 sản phẩm.")
 
         await browser.close()
 
