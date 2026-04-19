@@ -69,22 +69,31 @@ async def scrape_product_detail(context, url):
 # --- HÀM CHÍNH ---
 async def main():
     if not DB_URL: return print("❌ Thiếu DATABASE_URL")
-    conn = psycopg2.connect(DB_URL)
-    cur = conn.cursor(cursor_factory=RealDictCursor)
     
+    # --- BƯỚC 1: QUÉT LINK TRƯỚC (CHƯA MỞ DATABASE) ---
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
 
-        # 1. LẤY MỘT DANH MỤC TRONG BẢNG CATEGORIES (Quay vòng)
-        cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 1")
-        cat = cur.fetchone()
-        
+        # Mở kết nối tạm để lấy 1 danh mục
+        temp_conn = psycopg2.connect(DB_URL)
+        temp_cur = temp_conn.cursor(cursor_factory=RealDictCursor)
+        temp_cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 1")
+        cat = temp_cur.fetchone()
+        temp_conn.close() # Đóng ngay để tránh treo kết nối
+
+        product_links = []
         if cat:
-            # Truyền cat['url'] vào thay vì link cố định
+            # Quét link (quá trình này mất 1-2 phút)
             product_links = await discover_links(page, cat['url']) 
-            
+        
+        # --- BƯỚC 2: MỞ KẾT NỐI LẠI ĐỂ LƯU DỮ LIỆU ---
+        conn = psycopg2.connect(DB_URL)
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        if cat and product_links:
+            print(f"📥 Đang nạp {len(product_links)} link vào Database...")
             for link in product_links:
                 cur.execute("""
                     INSERT INTO products (url, category_name, status) 
@@ -95,7 +104,7 @@ async def main():
             cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
             conn.commit()
 
-        # 2. CÀO CHI TIẾT 20 SẢN PHẨM ĐANG ĐỢI (PENDING)
+        # --- BƯỚC 3: CÀO CHI TIẾT 20 SP ---
         cur.execute("SELECT id, url FROM products WHERE status = 'pending' LIMIT 20")
         jobs = cur.fetchall()
         
@@ -117,7 +126,8 @@ async def main():
                 print(f"✅ Đã lưu: {info['product_name']}")
 
         await browser.close()
-    conn.close()
+        cur.close()
+        conn.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
