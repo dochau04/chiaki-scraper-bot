@@ -99,12 +99,19 @@ async def main():
                     data = [(l, cat['category_name'], 'pending') for l in links]
                     
                     # Chia nhỏ data thành các nhóm 100 cái một
-                    batch_size = 100
+                    # Chia nhỏ data thành các nhóm 50 cái một để tránh lỗi mạng
+                    batch_size = 50 
                     for i in range(0, len(data), batch_size):
                         batch = data[i:i + batch_size]
-                        execute_values(cur, "INSERT INTO products (url, category_name, status) VALUES %s ON CONFLICT (url) DO NOTHING", batch)
-                        conn.commit() # Lưu ngay từng đợt
-                        print(f"✅ Đã nạp xong nhóm {i//batch_size + 1}")
+                        execute_values(cur, """
+                            INSERT INTO products (url, category_name, status) 
+                            VALUES %s ON CONFLICT (url) DO NOTHING
+                        """, batch)
+                        conn.commit() # Lưu ngay từng đợt để giải phóng bộ nhớ
+                        
+                        # QUAN TRỌNG: Nghỉ 1 giây để tránh nghẽn đường truyền SSL/Timeout
+                        await asyncio.sleep(1) 
+                        print(f"✅ Master đã nạp xong nhóm {i//batch_size + 1}")
 
                     cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
                     conn.commit()
