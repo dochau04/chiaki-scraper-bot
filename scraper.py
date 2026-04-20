@@ -95,21 +95,29 @@ async def main():
                 await browser.close()
                 
                 if links:
-                    print(f"📥 [MASTER] Nạp {len(links)} link mồi (Chia nhỏ để tránh Timeout)...")
+                    print(f"📥 [MASTER] Nạp {len(links)} link mồi...")
                     data = [(l, cat['category_name'], 'pending') for l in links]
                     
-                    # Chia nhỏ data thành các nhóm 100 cái một
-                    # Chia nhỏ data thành các nhóm 50 cái một để tránh lỗi mạng
                     batch_size = 50 
                     for i in range(0, len(data), batch_size):
                         batch = data[i:i + batch_size]
-                        execute_values(cur, """
-                            INSERT INTO products (url, category_name, status) 
-                            VALUES %s ON CONFLICT (url) DO NOTHING
-                        """, batch)
-                        conn.commit() # Lưu ngay từng đợt để giải phóng bộ nhớ
                         
-                        # QUAN TRỌNG: Nghỉ 1 giây để tránh nghẽn đường truyền SSL/Timeout
+                        # 🚀 THÊM CƠ CHẾ THỬ LẠI (RETRY) Ở ĐÂY
+                        for attempt in range(3): # Thử lại tối đa 3 lần
+                            try:
+                                execute_values(cur, """
+                                    INSERT INTO products (url, category_name, status) 
+                                    VALUES %s ON CONFLICT (url) DO NOTHING
+                                """, batch)
+                                conn.commit()
+                                break # Thành công thì thoát vòng lặp thử lại
+                            except (psycopg2.OperationalError, psycopg2.InterfaceError) as e:
+                                print(f"⚠️ Lỗi kết nối, đang thử lại lần {attempt + 1}...")
+                                await asyncio.sleep(5) # Đợi 5 giây cho mạng ổn định
+                                # Tạo lại kết nối nếu cần
+                                conn = psycopg2.connect(DB_URL)
+                                cur = conn.cursor(cursor_factory=RealDictCursor)
+                        
                         await asyncio.sleep(1) 
                         print(f"✅ Master đã nạp xong nhóm {i//batch_size + 1}")
 
