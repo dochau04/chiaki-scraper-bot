@@ -2,16 +2,16 @@ name: Chiaki Distributed Scraper
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Tự động chạy mỗi 30 phút
-  workflow_dispatch:      # Nút bấm chạy thủ công
+    - cron: '*/30 * * * *' # Chạy tự động mỗi 30 phút
+  workflow_dispatch:      # Chạy thủ công
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false    # Quan trọng: Một máy lỗi các máy khác vẫn chạy bình thường
+      fail-fast: false    # Một máy lỗi, các máy khác vẫn chạy tiếp
       matrix:
-        worker_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] # Khởi tạo 10 máy ảo song song
+        worker_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     
     steps:
       - name: Checkout code
@@ -23,12 +23,15 @@ jobs:
           python-version: '3.11'
           
       - name: Install dependencies
+        # Nếu cài lỗi (do mạng lag), thử lại lần 2 ngay lập tức
         run: |
-          pip install playwright psycopg2-binary
+          pip install playwright psycopg2-binary || (sleep 5 && pip install playwright psycopg2-binary)
           playwright install chromium
           
       - name: Run Scraper
+        # Thiết lập thời gian tối đa là 6 tiếng cho mỗi worker
+        timeout-minutes: 360 
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          worker_id: ${{ matrix.worker_id }} # Truyền ID máy ảo vào code Python
+          worker_id: ${{ matrix.worker_id }}
         run: python scraper.py
