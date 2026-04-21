@@ -8,17 +8,19 @@ import time
 DB_URL = os.environ.get('DATABASE_URL')
 WORKER_ID = os.environ.get('worker_id', '1')
 START_TIME = time.time()
-# Sửa từ 5.5 tiếng thành 50 phút (để nó nghỉ 10 phút trước khi đợt mới bắt đầu)
 MAX_RUNTIME = 0.8 * 3600
-CONCURRENCY = 3  # Giảm xuống 3 để máy ảo load web kỹ hơn, tránh bị NULL
+CONCURRENCY = 3 
 
-async def discover_links(page, url):
-    print(f"🚀 [MASTER] Đang thu thập link sản phẩm từ: {url}")
-    links = set()
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        await asyncio.sleep(5) 
-        for i in range(20):
+async def discover_links(page, category_url):
+    all_links = set()
+    # Giữ logic lấy link của Châu nhưng bọc vào vòng lặp trang
+    for p in range(1, 11): 
+        url = f"{category_url}?page={p}"
+        try:
+            print(f"🚀 [MASTER] Đang quét trang {p}: {url}")
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(4) 
+            
             new_links = await page.evaluate('''() => {
                 const selectors = ['.product-item a', '.name-product a', '.item-product a', 'h3 a'];
                 let found = [];
@@ -31,17 +33,11 @@ async def discover_links(page, url):
                 });
                 return found;
             }''')
+            if not new_links: break
             for l in new_links: links.add(l)
-            if len(links) >= 1000: break
-            await page.mouse.wheel(0, 3000)
-            await asyncio.sleep(2)
-            try:
-                load_more = await page.query_selector('text="Xem thêm"')
-                if load_more: await load_more.click(); await asyncio.sleep(3)
-            except: pass
-        return list(links)
-    except Exception as e:
-        print(f"❌ Lỗi quét danh mục: {e}"); return []
+        except:
+            break
+    return list(all_links)
 
 async def scrape_product_detail(context, url):
     page = await context.new_page()
@@ -104,95 +100,53 @@ async def worker_task(context, job_queue, results):
 
 async def main():
     if not DB_URL: return
-    
-    # --- PHẦN DÀNH CHO MASTER (WORKER 1) ---
     if WORKER_ID == '1':
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
-            
-            categories = []
             try:
-                # Lấy danh mục với cơ chế mở-đóng kết nối nhanh
                 with psycopg2.connect(DB_URL) as conn:
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                        cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 3")
+                        cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 10")
                         categories = cur.fetchall()
-            except Exception as e:
-                print(f"❌ Master không thể lấy danh mục: {e}")
-                await browser.close(); return
-
-            for cat in categories:
-                print(f"🚀 [MASTER] Đang quét: {cat['category_name']}")
-                links = await discover_links(page, cat['url'])
-                
-                if links:
-                    data = [(l, cat['category_name']) for l in links]
-                    try:
+                for cat in categories:
+                    links = await discover_links(page, cat['url'])
+                    if links:
+                        data = [(l, cat['category_name']) for l in links]
                         with psycopg2.connect(DB_URL) as conn:
                             with conn.cursor() as cur:
                                 for i in range(0, len(data), 100):
                                     cur.executemany("INSERT INTO products (url, category_name, status) VALUES (%s, %s, 'pending') ON CONFLICT (url) DO NOTHING", data[i:i+100])
                                 cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
                                 conn.commit()
-                                print(f"✅ Đã nạp thành công mục: {cat['category_name']}")
-                    except Exception as e:
-                        print(f"⚠️ Lỗi nạp dữ liệu mục {cat['category_name']} (Bỏ qua): {e}")
-                else:
-                    print(f"⚠️ Không tìm thấy link trong mục: {cat['category_name']}")
-            
-            await browser.close()
+            finally:
+                await browser.close()
         return
 
-    # --- PHẦN DÀNH CHO WORKERS (2-10) ---
-    await asyncio.sleep(30) # Đợi Master nạp hàng
+    await asyncio.sleep(20)
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={"width": 1280, "height": 800})
-        
         while time.time() - START_TIME < MAX_RUNTIME:
-            jobs = []
-            conn = None
             try:
-                # THỬ KẾT NỐI VÀ LẤY JOB - NẾU LỖI THÌ THỬ LẠI
-                conn = psycopg2.connect(DB_URL)
-                cur = conn.cursor(cursor_factory=RealDictCursor)
-                cur.execute("UPDATE products SET status = 'processing' WHERE id IN (SELECT id FROM products WHERE status = 'pending' ORDER BY id ASC LIMIT 20 FOR UPDATE SKIP LOCKED) RETURNING id, url;")
-                jobs = cur.fetchall()
-                conn.commit()
+                with psycopg2.connect(DB_URL) as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute("UPDATE products SET status = 'processing' WHERE id IN (SELECT id FROM products WHERE status = 'pending' ORDER BY id ASC LIMIT 20 FOR UPDATE SKIP LOCKED) RETURNING id, url;")
+                        jobs = cur.fetchall()
+                        if not jobs: 
+                            await asyncio.sleep(30); continue
+                        queue = asyncio.Queue()
+                        for j in jobs: await queue.put(j)
+                        results = []
+                        tasks = [asyncio.create_task(worker_task(context, queue, results)) for _ in range(CONCURRENCY)]
+                        await queue.join()
+                        for t in tasks: t.cancel()
+                        for info, j_id in results:
+                            cur.execute("""UPDATE products SET product_name=%s, price_sale=%s, price_market=%s, image_link=%s, brand=%s, origin=%s, stock=%s, sold=%s, description=%s, kho_hang=%s, status='completed', updated_at=NOW() WHERE id=%s""",
+                                (str(info['product_name']), str(info['price_sale']), str(info['price_market']), str(info['image_link']), str(info['brand']), str(info['origin']), str(info['stock']), str(info['sold']), str(info['description']), str(info['kho_hang']), j_id))
+                        conn.commit()
             except Exception as e:
-                print(f"⚠️ Worker {WORKER_ID} lỗi kết nối DB: {e}. Đang thử lại sau 10s...")
-                if conn: conn.rollback(); conn.close()
                 await asyncio.sleep(10)
-                continue # Nhảy về đầu vòng lặp để thử lại
-
-            if not jobs:
-                cur.close(); conn.close()
-                print(f"🏁 Worker {WORKER_ID}: Không còn hàng, ngủ 30s...")
-                await asyncio.sleep(30)
-                continue
-            
-            # CÀO DỮ LIỆU
-            queue = asyncio.Queue()
-            for j in jobs: await queue.put(j)
-            results = []
-            tasks = [asyncio.create_task(worker_task(context, queue, results)) for _ in range(CONCURRENCY)]
-            await queue.join()
-            for t in tasks: t.cancel()
-
-            # NẠP KẾT QUẢ VỀ DB - CÓ TRY/EXCEPT ĐỂ CHỐNG SẬP
-            try:
-                for info, j_id in results:
-                    cur.execute("""UPDATE products SET product_name=%s, price_sale=%s, price_market=%s, image_link=%s, brand=%s, origin=%s, stock=%s, sold=%s, description=%s, kho_hang=%s, status='completed', worker_id=%s, updated_at=NOW() WHERE id=%s""",
-                        (str(info['product_name']), str(info['price_sale']), str(info['price_market']), str(info['image_link']), str(info['brand']), str(info['origin']), str(info['stock']), str(info['sold']), str(info['description']), str(info['kho_hang']), WORKER_ID, j_id))
-                conn.commit()
-                print(f"✅ Worker {WORKER_ID} cào xong 1 đợt ({len(results)} sp)")
-            except Exception as e:
-                print(f"❌ Lỗi khi lưu kết quả: {e}")
-                conn.rollback()
-            finally:
-                cur.close(); conn.close()
-                
         await browser.close()
 
 if __name__ == "__main__":
