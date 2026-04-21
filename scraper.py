@@ -138,6 +138,8 @@ async def main():
                                 print(f"✅ Master nạp xong mục: {cat['category_name']}")
             except Exception as e:
                 print(f"❌ Master bị lỗi kết nối: {e}")
+                if 'conn' in locals():
+                    conn.rollback() # Trả lại trạng thái an toàn nếu bị lỗi giữa chừng
             finally:
                 await browser.close()
         return
