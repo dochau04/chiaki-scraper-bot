@@ -108,28 +108,40 @@ async def main():
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
-            conn = psycopg2.connect(DB_URL)
-            cur = conn.cursor(cursor_factory=RealDictCursor)
-            # Master lấy 5 danh mục cùng lúc
-            cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 5")
-            categories = cur.fetchall() # Lấy danh sách 5 mục
             
-            for cat in categories: # Duyệt qua từng mục để lấy link
+            # 1. Lấy danh sách danh mục trước
+            conn_init = psycopg2.connect(DB_URL)
+            cur_init = conn_init.cursor(cursor_factory=RealDictCursor)
+            cur_init.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 5")
+            categories = cur_init.fetchall()
+            cur_init.close()
+            conn_init.close()
+            
+            if not categories:
+                print("🏁 Không còn danh mục nào để quét.")
+                await browser.close(); return
+
+            for cat in categories:
+                print(f"🚀 [MASTER] Đang quét: {cat['category_name']}")
                 links = await discover_links(page, cat['url'])
+                
                 if links:
                     data = [(l, cat['category_name']) for l in links]
-                    print(f"📦 Đang nạp {len(data)} link cho mục {cat['category_name']}...")
+                    # 2. Mỗi lần nạp link mở một kết nối riêng để tránh lỗi SSL đứt đoạn
                     try:
-                        for i in range(0, len(data), 100):
-                            cur.executemany("INSERT INTO products (url, category_name, status) VALUES (%s, %s, 'pending') ON CONFLICT (url) DO NOTHING", data[i:i+100])
-                        
-                        cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
-                        conn.commit()
-                        print(f"✅ Đã xong mục: {cat['category_name']}")
-                    except Exception as db_err:
-                        print(f"❌ Lỗi DB mục {cat['category_name']}: {db_err}")
-                        conn.rollback()
-            cur.close(); conn.close(); await browser.close()
+                        with psycopg2.connect(DB_URL) as conn:
+                            with conn.cursor() as cur:
+                                for i in range(0, len(data), 100):
+                                    cur.executemany("INSERT INTO products (url, category_name, status) VALUES (%s, %s, 'pending') ON CONFLICT (url) DO NOTHING", data[i:i+100])
+                                cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
+                                conn.commit()
+                                print(f"✅ Đã nạp thành công mục: {cat['category_name']}")
+                    except Exception as e:
+                        print(f"⚠️ Lỗi nạp dữ liệu mục {cat['category_name']} (Bỏ qua): {e}")
+                else:
+                    print(f"⚠️ Không tìm thấy link trong mục: {cat['category_name']}")
+            
+            await browser.close()
         return
 
     await asyncio.sleep(60) 
