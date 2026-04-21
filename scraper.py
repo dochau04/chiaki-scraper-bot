@@ -8,7 +8,8 @@ import time
 DB_URL = os.environ.get('DATABASE_URL')
 WORKER_ID = os.environ.get('worker_id', '1')
 START_TIME = time.time()
-MAX_RUNTIME = 5.5 * 3600
+# Sửa từ 5.5 tiếng thành 50 phút (để nó nghỉ 10 phút trước khi đợt mới bắt đầu)
+MAX_RUNTIME = 0.8 * 3600
 CONCURRENCY = 3  # Giảm xuống 3 để máy ảo load web kỹ hơn, tránh bị NULL
 
 async def discover_links(page, url):
