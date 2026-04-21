@@ -13,41 +13,56 @@ CONCURRENCY = 3
 
 async def discover_links(page, category_url):
     all_links = set()
-    for p in range(1, 21): 
+    # Tăng lên hẳn 50 trang để lấy cho đã Châu nhé
+    for p in range(1, 51): 
         url = f"{category_url}?page={p}"
         try:
-            print(f"🚀 [MASTER] Đang lật sang trang {p}: {url}")
-            # Dùng wait_until="networkidle" để đợi web load xong API sản phẩm
+            print(f"🚀 [MASTER] Đang quét trang {p}: {url}")
+            # Đợi mạng nghỉ (networkidle) để web load xong danh sách SP
             await page.goto(url, wait_until="networkidle", timeout=60000)
             
-            # Cuộn xuống cuối trang để trigger lazy load (nếu có)
-            await page.mouse.wheel(0, 3000)
+            # Cuộn nhẹ để trigger các thành phần ẩn
+            await page.mouse.wheel(0, 2000)
             await asyncio.sleep(2)
             
-            # Selector chuẩn hơn để chỉ bốc link sản phẩm trong danh sách
+            # Selector cực kỳ tập trung vào vùng chứa sản phẩm
             results = await page.evaluate('''() => {
-                // Chỉ bốc link trong khung danh sách sản phẩm, bỏ qua menu/footer
-                const container = document.querySelector('.list-product') || document.querySelector('#load_data_product') || document;
-                const items = container.querySelectorAll('a');
-                return Array.from(items)
+                // Chỉ bốc link trong thẻ chứa sản phẩm, loại bỏ menu/footer/sidebar
+                const container = document.querySelector('.list-product') || 
+                                  document.querySelector('#load_data_product') || 
+                                  document.body;
+                
+                return Array.from(container.querySelectorAll('a'))
                     .map(a => a.href)
-                    .filter(href => href.includes('chiaki.vn/') && href.includes('-p-'));
+                    .filter(href => {
+                        return href.includes('chiaki.vn/') && 
+                               href.includes('-p-') && // BẮT BUỘC có -p- mới là sản phẩm
+                               !href.includes('tin-tuc') &&
+                               !href.includes('hoi-dap');
+                    });
             }''')
             
-            if not results: break
+            if not results:
+                print(f"⏹️ Trang {p} không có sản phẩm nào. Dừng.")
+                break
             
             before_size = len(all_links)
-            for l in results: all_links.add(l)
+            for l in results:
+                all_links.add(l)
+            after_size = len(all_links)
             
-            # Nếu lật sang trang mới mà không thêm được link nào mới vào bộ nhớ => Dừng vì bị trùng
-            if len(all_links) == before_size and p > 1:
-                print(f"⏹️ Trang {p} trùng lặp hoàn toàn với trang trước. Dừng lật trang.")
+            # Nếu sang trang mới mà không thêm được link nào "thực sự mới" 
+            # thì mới coi là trùng và dừng lại
+            if after_size == before_size and p > 1:
+                print(f"⏹️ Trang {p} toàn link đã có. Kết thúc lật trang.")
                 break
                 
-            print(f"✅ Trang {p}: Lấy {len(results)} link. Tích lũy duy nhất: {len(all_links)}")
+            print(f"✅ Trang {p}: Lấy {len(results)} link. Tổng tích lũy: {after_size}")
+            
         except Exception as e:
-            print(f"⚠️ Lỗi lật trang {p}: {e}")
+            print(f"⚠️ Lỗi ở trang {p}: {e}")
             break
+            
     return list(all_links)
 
 async def scrape_product_detail(context, url):
