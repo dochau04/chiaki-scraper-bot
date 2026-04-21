@@ -14,54 +14,54 @@ CONCURRENCY = 3
 async def discover_links(page, category_url):
     all_links = set()
     p = 1
-    consecutive_empty_pages = 0 # Đếm số trang trống liên tiếp
+    consecutive_empty_pages = 0
     
-    while p <= 150: # Giới hạn tối đa 150 trang để tránh vòng lặp vô tận
+    while p <= 200: # Cho lật thoải mái tới trang 200
         url = f"{category_url}?page={p}"
         try:
             print(f"🚀 [MASTER] Đang quét trang {p}: {url}")
-            await page.goto(url, wait_until="networkidle", timeout=60000)
+            # Chuyển qua wait_until="domcontentloaded" cho nhanh, vì mình sleep sau đó rồi
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             
-            # Cuộn trang mạnh để kích hoạt render sản phẩm
-            await page.mouse.wheel(0, 3000)
-            await asyncio.sleep(2)
+            # Cuộn chuột thật mạnh để kích hoạt render
+            await page.mouse.wheel(0, 4000)
+            await asyncio.sleep(4) # Tăng thời gian đợi một chút cho chắc
             
+            # SELECTOR MỚI: Quét rộng hơn để không sót cái nào
             results = await page.evaluate('''() => {
-                const items = document.querySelectorAll('.product-item a, .name-product a, #load_data_product a');
-                return Array.from(items)
-                    .map(a => a.href)
-                    .filter(href => href.includes('-p-') && !href.includes('tin-tuc'));
+                let found = [];
+                // Quét tất cả thẻ a có cấu trúc link sản phẩm chiaki
+                document.querySelectorAll('a').forEach(a => {
+                    const href = a.href;
+                    if (href.includes('-p-') && !href.includes('tin-tuc') && href.includes('chiaki.vn/')) {
+                        found.push(href);
+                    }
+                });
+                return found;
             }''')
             
-            # CHỖ NÀY QUAN TRỌNG: 
-            # Nếu trang hoàn toàn không có thẻ HTML nào chứa sản phẩm (thực sự hết hàng)
             if not results or len(results) == 0:
                 consecutive_empty_pages += 1
-                print(f"⚠️ Trang {p} không thấy sản phẩm. Thử thêm... ({consecutive_empty_pages}/3)")
-                if consecutive_empty_pages >= 3: # Nếu 3 trang liên tiếp trống thì mới dừng
-                    print(f"🏁 Đã thực sự hết hàng tại trang {p}. Dừng lại.")
+                print(f"⚠️ Trang {p} không thấy sản phẩm. Đang thử lại... ({consecutive_empty_pages}/3)")
+                if consecutive_empty_pages >= 3:
                     break
                 p += 1
                 continue
             
-            consecutive_empty_pages = 0 # Reset nếu thấy có sản phẩm
-            
+            consecutive_empty_pages = 0
             before_size = len(all_links)
-            for l in results:
-                all_links.add(l)
+            for l in results: all_links.add(l)
             after_size = len(all_links)
             
-            # CHỖ NÀY CŨNG QUAN TRỌNG: 
-            # Dù trang này toàn link cũ (after == before) thì VẪN LẬT TIẾP trang sau
-            if after_size == before_size:
-                print(f"⏩ Trang {p} toàn link cũ đã cào. Đang lật tiếp để tìm hàng mới...")
+            # In log chi tiết để Châu theo dõi
+            if after_size > before_size:
+                print(f"✅ Trang {p}: Bốc được {after_size - before_size} link mới. Tích lũy: {after_size}")
             else:
-                print(f"✅ Trang {p}: Bốc thêm được {after_size - before_size} link mới. Tổng tích lũy: {after_size}")
+                print(f"⏩ Trang {p}: Không có link mới (toàn link cũ). Vẫn lật tiếp...")
             
-            p += 1 # Luôn nhảy sang trang tiếp theo
-            
+            p += 1
         except Exception as e:
-            print(f"⚠️ Lỗi lật trang {p}: {e}")
+            print(f"⚠️ Lỗi trang {p}: {e}")
             break
             
     return list(all_links)
