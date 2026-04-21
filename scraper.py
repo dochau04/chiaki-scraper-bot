@@ -139,6 +139,9 @@ async def main():
                                 cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
                                 conn.commit() # Chốt dữ liệu danh mục này
                                 print(f"✅ Master nạp xong mục: {cat['category_name']}")
+                        cur.execute("UPDATE crawl_status SET is_done = TRUE WHERE id = 1;")
+                        conn.commit()
+                        print("✅ MASTER DONE")
             except Exception as e:
                 print(f"❌ Master bị lỗi kết nối: {e}")
                 if 'conn' in locals():
@@ -147,7 +150,7 @@ async def main():
                 await browser.close()
         return
 
-    await asyncio.sleep(20)
+    await asyncio.sleep(60)
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={"width": 1280, "height": 800})
@@ -162,7 +165,7 @@ async def main():
                             empty_count += 1
                             print(f"⏳ Không có job ({empty_count}/3)")
                         
-                            if empty_count >= 3:
+                            if empty_count >= 20:
                                 print("✅ Hết job → Worker dừng")
                                 break
                         
