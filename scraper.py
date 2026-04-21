@@ -13,15 +13,16 @@ CONCURRENCY = 3
 
 async def discover_links(page, category_url):
     all_links = set()
-    # Giữ logic lấy link của Châu nhưng bọc vào vòng lặp trang
-    for p in range(1, 11): 
+    # Châu cho chạy từ trang 1 đến 20 (hoặc hơn) để lấy thật nhiều
+    for p in range(1, 21): 
         url = f"{category_url}?page={p}"
         try:
-            print(f"🚀 [MASTER] Đang quét trang {p}: {url}")
+            print(f"🚀 [MASTER] Đang lật sang trang {p}: {url}")
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            await asyncio.sleep(4) 
+            await asyncio.sleep(3) # Đợi web load sản phẩm
             
-            new_links = await page.evaluate('''() => {
+            # Lấy link bằng đúng selector của Châu
+            results = await page.evaluate('''() => {
                 const selectors = ['.product-item a', '.name-product a', '.item-product a', 'h3 a'];
                 let found = [];
                 selectors.forEach(s => {
@@ -33,10 +34,20 @@ async def discover_links(page, category_url):
                 });
                 return found;
             }''')
-            if not new_links: break
-            for l in new_links: links.add(l)
-        except:
+            
+            # QUAN TRỌNG: Nếu trang này không có sản phẩm nào thì mới dừng lật trang
+            if not results or len(results) == 0:
+                print(f"⏹️ Đã hết hàng ở danh mục này tại trang {p}")
+                break
+                
+            for l in results:
+                all_links.add(l)
+                
+            print(f"✅ Đã lấy thêm {len(results)} link ở trang {p}. Tổng: {len(all_links)}")
+        except Exception as e:
+            print(f"⚠️ Lỗi khi lật trang {p}: {e}")
             break
+            
     return list(all_links)
 
 async def scrape_product_detail(context, url):
@@ -105,20 +116,27 @@ async def main():
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             try:
+                # Master lấy 10 danh mục "cũ nhất" hoặc "chưa quét"
                 with psycopg2.connect(DB_URL) as conn:
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
                         cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 10")
                         categories = cur.fetchall()
+                
                 for cat in categories:
+                    # Sau khi discover_links xong 20 trang của danh mục này...
                     links = await discover_links(page, cat['url'])
+                    
                     if links:
+                        # ...thì nó sẽ nạp vào DB
                         data = [(l, cat['category_name']) for l in links]
                         with psycopg2.connect(DB_URL) as conn:
                             with conn.cursor() as cur:
                                 for i in range(0, len(data), 100):
                                     cur.executemany("INSERT INTO products (url, category_name, status) VALUES (%s, %s, 'pending') ON CONFLICT (url) DO NOTHING", data[i:i+100])
+                                # Đánh dấu đã quét để lần sau Master lấy danh mục KHÁC
                                 cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
                                 conn.commit()
+                        print(f"🏁 ĐÃ XONG DANH MỤC: {cat['category_name']}. Chuyển sang mục tiếp theo...")
             finally:
                 await browser.close()
         return
