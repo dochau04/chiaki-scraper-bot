@@ -14,18 +14,18 @@ CONCURRENCY = 3
 async def discover_links(page, category_url):
     all_links = set()
     p = 1
-    while True: # Chạy không giới hạn số trang
+    consecutive_empty_pages = 0 # Đếm số trang trống liên tiếp
+    
+    while p <= 150: # Giới hạn tối đa 150 trang để tránh vòng lặp vô tận
         url = f"{category_url}?page={p}"
         try:
-            print(f"🚀 [MASTER] Đang lật sang trang {p}: {url}")
-            # Đợi mạng nghỉ hoàn toàn để đảm bảo dữ liệu đã render
+            print(f"🚀 [MASTER] Đang quét trang {p}: {url}")
             await page.goto(url, wait_until="networkidle", timeout=60000)
             
-            # Cuộn trang để kích hoạt load ảnh/data
-            await page.mouse.wheel(0, 2000)
+            # Cuộn trang mạnh để kích hoạt render sản phẩm
+            await page.mouse.wheel(0, 3000)
             await asyncio.sleep(2)
             
-            # Selector tập trung cao độ vào link sản phẩm
             results = await page.evaluate('''() => {
                 const items = document.querySelectorAll('.product-item a, .name-product a, #load_data_product a');
                 return Array.from(items)
@@ -33,31 +33,38 @@ async def discover_links(page, category_url):
                     .filter(href => href.includes('-p-') && !href.includes('tin-tuc'));
             }''')
             
-            # ĐIỀU KIỆN DỪNG 1: Trang trắng, không có link sản phẩm nào
+            # CHỖ NÀY QUAN TRỌNG: 
+            # Nếu trang hoàn toàn không có thẻ HTML nào chứa sản phẩm (thực sự hết hàng)
             if not results or len(results) == 0:
-                print(f"🏁 Đã chạm đến trang cuối cùng (Trang {p-1}). Dừng lại.")
-                break
+                consecutive_empty_pages += 1
+                print(f"⚠️ Trang {p} không thấy sản phẩm. Thử thêm... ({consecutive_empty_pages}/3)")
+                if consecutive_empty_pages >= 3: # Nếu 3 trang liên tiếp trống thì mới dừng
+                    print(f"🏁 Đã thực sự hết hàng tại trang {p}. Dừng lại.")
+                    break
+                p += 1
+                continue
+            
+            consecutive_empty_pages = 0 # Reset nếu thấy có sản phẩm
             
             before_size = len(all_links)
             for l in results:
                 all_links.add(l)
             after_size = len(all_links)
             
-            # ĐIỀU KIỆN DỪNG 2: Nếu sang trang mới mà 100% link đều đã lấy rồi
-            # (Thường do web tự quay lại trang 1 hoặc bị kẹt)
-            if after_size == before_size and p > 1:
-                print(f"⏹️ Phát hiện lặp nội dung ở trang {p}. Có thể đã hết sản phẩm.")
-                break
-                
-            print(f"✅ Trang {p}: Bốc được {len(results)} link. Tổng tích lũy: {after_size}")
-            p += 1 # Nhảy sang trang tiếp theo
+            # CHỖ NÀY CŨNG QUAN TRỌNG: 
+            # Dù trang này toàn link cũ (after == before) thì VẪN LẬT TIẾP trang sau
+            if after_size == before_size:
+                print(f"⏩ Trang {p} toàn link cũ đã cào. Đang lật tiếp để tìm hàng mới...")
+            else:
+                print(f"✅ Trang {p}: Bốc thêm được {after_size - before_size} link mới. Tổng tích lũy: {after_size}")
+            
+            p += 1 # Luôn nhảy sang trang tiếp theo
             
         except Exception as e:
             print(f"⚠️ Lỗi lật trang {p}: {e}")
             break
             
     return list(all_links)
-
 async def scrape_product_detail(context, url):
     page = await context.new_page()
     try:
