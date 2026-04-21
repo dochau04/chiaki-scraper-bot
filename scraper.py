@@ -109,7 +109,7 @@ async def main():
             page = await browser.new_page()
             conn = psycopg2.connect(DB_URL)
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 1")
+            cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 5")    
             cat = cur.fetchone()
             if cat:
                 links = await discover_links(page, cat['url'])
