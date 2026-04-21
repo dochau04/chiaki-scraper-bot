@@ -2,7 +2,7 @@ name: Chiaki Distributed Scraper
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Chạy tự động mỗi 30 phút
+    - cron: '0 * * * *' # Chạy tự động mỗi 30 phút
   workflow_dispatch:      # Chạy thủ công
 
 jobs:
