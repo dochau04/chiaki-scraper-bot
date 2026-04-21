@@ -7,6 +7,7 @@ import time
 
 DB_URL = os.environ.get('DATABASE_URL')
 WORKER_ID = os.environ.get('worker_id', '1')
+print("🚀 WORKER_ID =", WORKER_ID)
 START_TIME = time.time()
 MAX_RUNTIME = 0.8 * 3600
 CONCURRENCY = 3 
@@ -127,8 +128,10 @@ async def main():
                         
                         for cat in categories:
                             links = await discover_links(page, cat['url'])
+                            print(f"🔥 Crawl được {len(links)} link")
                             if links:
                                 data = [(l, cat['category_name']) for l in links]
+                                print(f"📦 Chuẩn bị insert {len(data)} link")
                                 # Nạp link (Dùng luôn cur và conn đang có, không mở mới)
                                 for i in range(0, len(data), 100):
                                     cur.executemany("INSERT INTO products (url, category_name, status) VALUES (%s, %s, 'pending') ON CONFLICT (url) DO NOTHING", data[i:i+100])
@@ -148,14 +151,25 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(viewport={"width": 1280, "height": 800})
+        empty_count = 0
         while time.time() - START_TIME < MAX_RUNTIME:
             try:
                 with psycopg2.connect(DB_URL) as conn:
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
                         cur.execute("UPDATE products SET status = 'processing' WHERE id IN (SELECT id FROM products WHERE status = 'pending' ORDER BY id ASC LIMIT 20 FOR UPDATE SKIP LOCKED) RETURNING id, url;")
                         jobs = cur.fetchall()
-                        if not jobs: 
-                            await asyncio.sleep(30); continue
+                        if not jobs:
+                            empty_count += 1
+                            print(f"⏳ Không có job ({empty_count}/3)")
+                        
+                            if empty_count >= 3:
+                                print("✅ Hết job → Worker dừng")
+                                break
+                        
+                            await asyncio.sleep(10)
+                            continue
+                        else:
+                            empty_count = 0
                         queue = asyncio.Queue()
                         for j in jobs: await queue.put(j)
                         results = []
