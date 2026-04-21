@@ -111,32 +111,33 @@ async def worker_task(context, job_queue, results):
 
 async def main():
     if not DB_URL: return
+    # --- PHẦN DÀNH CHO MASTER (WORKER 1) ---
     if WORKER_ID == '1':
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
+            
             try:
-                # Master lấy 10 danh mục "cũ nhất" hoặc "chưa quét"
+                # MỞ 1 KẾT NỐI DUY NHẤT TẠI ĐÂY
                 with psycopg2.connect(DB_URL) as conn:
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                        cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 10")
+                        # Lấy danh mục
+                        cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 5")
                         categories = cur.fetchall()
-                
-                for cat in categories:
-                    # Sau khi discover_links xong 20 trang của danh mục này...
-                    links = await discover_links(page, cat['url'])
-                    
-                    if links:
-                        # ...thì nó sẽ nạp vào DB
-                        data = [(l, cat['category_name']) for l in links]
-                        with psycopg2.connect(DB_URL) as conn:
-                            with conn.cursor() as cur:
+                        
+                        for cat in categories:
+                            links = await discover_links(page, cat['url'])
+                            if links:
+                                data = [(l, cat['category_name']) for l in links]
+                                # Nạp link (Dùng luôn cur và conn đang có, không mở mới)
                                 for i in range(0, len(data), 100):
                                     cur.executemany("INSERT INTO products (url, category_name, status) VALUES (%s, %s, 'pending') ON CONFLICT (url) DO NOTHING", data[i:i+100])
-                                # Đánh dấu đã quét để lần sau Master lấy danh mục KHÁC
+                                
                                 cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
-                                conn.commit()
-                        print(f"🏁 ĐÃ XONG DANH MỤC: {cat['category_name']}. Chuyển sang mục tiếp theo...")
+                                conn.commit() # Chốt dữ liệu danh mục này
+                                print(f"✅ Master nạp xong mục: {cat['category_name']}")
+            except Exception as e:
+                print(f"❌ Master bị lỗi kết nối: {e}")
             finally:
                 await browser.close()
         return
