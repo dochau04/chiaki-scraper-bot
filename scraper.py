@@ -13,33 +13,48 @@ CONCURRENCY = 3
 
 async def discover_links(page, category_url):
     all_links = set()
-    p = 1
+    p = 23  # <--- CHÂU SỬA CHỖ NÀY: Bắt đầu thẳng từ trang 23
     consecutive_empty_pages = 0 
     
-    while p <= 200: 
+    while p <= 250: # Tăng giới hạn trang lên vì Mỹ phẩm rất nhiều
         url = f"{category_url}?page={p}"
         try:
-            print(f"🚀 [MASTER] Đang quét trang {p}: {url}")
+            print(f"🚀 [MASTER] Đang nhảy cóc tới trang {p}: {url}")
+            # Đợi trang load
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             
-            await page.mouse.wheel(0, 4000)
+            # Đợi khung sản phẩm hiện ra
+            try:
+                await page.wait_for_selector('.list-product, #load_data_product', timeout=10000)
+            except:
+                print(f"⚠️ Trang {p} có vẻ không có danh sách sản phẩm.")
+
+            # Cuộn chuột để load đủ sản phẩm
+            await page.mouse.wheel(0, 3500)
             await asyncio.sleep(4) 
             
+            # Selector "Mắt Thần" chỉ lấy trong khung sản phẩm
             results = await page.evaluate('''() => {
                 let found = [];
-                document.querySelectorAll('a').forEach(a => {
-                    const href = a.href;
-                    if (href.includes('-p-') && !href.includes('tin-tuc') && href.includes('chiaki.vn/')) {
-                        found.push(href);
-                    }
-                });
+                const container = document.querySelector('.list-product') || 
+                                  document.querySelector('#load_data_product');
+                
+                if (container) {
+                    container.querySelectorAll('a').forEach(a => {
+                        const href = a.href;
+                        // Chỉ lấy link sản phẩm chuẩn (-p-)
+                        if (href.includes('-p-') && !href.includes('tin-tuc')) {
+                            found.push(href);
+                        }
+                    });
+                }
                 return found;
             }''')
             
             if not results or len(results) == 0:
                 consecutive_empty_pages += 1
-                print(f"⚠️ Trang {p} không thấy sản phẩm. Đang thử lại... ({consecutive_empty_pages}/3)")
                 if consecutive_empty_pages >= 3:
+                    print(f"🏁 Hết hàng thực sự ở trang {p}. Dừng.")
                     break
                 p += 1
                 continue
@@ -49,10 +64,11 @@ async def discover_links(page, category_url):
             for l in results: all_links.add(l)
             after_size = len(all_links)
             
+            # In log cho Châu theo dõi "hàng tươi"
             if after_size > before_size:
-                print(f"✅ Trang {p}: Bốc được {after_size - before_size} link mới. Tích lũy: {after_size}")
+                print(f"✨ Trang {p}: Bốc thêm {after_size - before_size} link mới. Tích lũy đợt này: {after_size}")
             else:
-                print(f"⏩ Trang {p}: Link cũ. Vẫn lật tiếp để tìm hàng mới...")
+                print(f"⏩ Trang {p}: Không có link mới (toàn link trùng). Vẫn lật tiếp...")
             
             p += 1
         except Exception as e:
