@@ -13,56 +13,49 @@ CONCURRENCY = 3
 
 async def discover_links(page, category_url):
     all_links = set()
-    for p in range(1, 51): 
+    p = 1
+    while True: # Chạy không giới hạn số trang
         url = f"{category_url}?page={p}"
         try:
-            print(f"🚀 [MASTER] Đang quét trang {p}: {url}")
-            # Đợi mạng nghỉ hoàn toàn để API sản phẩm load xong
+            print(f"🚀 [MASTER] Đang lật sang trang {p}: {url}")
+            # Đợi mạng nghỉ hoàn toàn để đảm bảo dữ liệu đã render
             await page.goto(url, wait_until="networkidle", timeout=60000)
             
-            # Cuộn chuột xuống từ từ để "ép" web hiện sản phẩm
-            for _ in range(3):
-                await page.mouse.wheel(0, 2000)
-                await asyncio.sleep(1)
+            # Cuộn trang để kích hoạt load ảnh/data
+            await page.mouse.wheel(0, 2000)
+            await asyncio.sleep(2)
             
-            # SELECTOR CẢI TIẾN: Chỉ lấy link có chứa cấu trúc sản phẩm của Chiaki
+            # Selector tập trung cao độ vào link sản phẩm
             results = await page.evaluate('''() => {
-                // Chỉ tập trung vào các thẻ chứa sản phẩm thực sự
-                const productSelectors = [
-                    '.list-product a', 
-                    '.product-item a', 
-                    '#load_data_product a',
-                    '.name-product a'
-                ];
-                let found = [];
-                productSelectors.forEach(sel => {
-                    document.querySelectorAll(sel).forEach(a => {
-                        // CHIẾN THUẬT: Link sản phẩm Chiaki luôn có "-p-" và không phải tin tức
-                        if (a.href.includes('-p-') && !a.href.includes('tin-tuc')) {
-                            found.push(a.href);
-                        }
-                    });
-                });
-                return found;
+                const items = document.querySelectorAll('.product-item a, .name-product a, #load_data_product a');
+                return Array.from(items)
+                    .map(a => a.href)
+                    .filter(href => href.includes('-p-') && !href.includes('tin-tuc'));
             }''')
             
+            # ĐIỀU KIỆN DỪNG 1: Trang trắng, không có link sản phẩm nào
             if not results or len(results) == 0:
-                print(f"⏹️ Trang {p} trống rỗng. Dừng.")
+                print(f"🏁 Đã chạm đến trang cuối cùng (Trang {p-1}). Dừng lại.")
                 break
             
-            before_count = len(all_links)
-            for l in results: all_links.add(l)
-            after_count = len(all_links)
+            before_size = len(all_links)
+            for l in results:
+                all_links.add(l)
+            after_size = len(all_links)
             
-            # Chỉ dừng nếu sau khi lọc -p- mà vẫn không có link nào mới
-            if after_count == before_count and p > 1:
-                print(f"⏹️ Trang {p} không có thêm sản phẩm mới. Kết thúc.")
+            # ĐIỀU KIỆN DỪNG 2: Nếu sang trang mới mà 100% link đều đã lấy rồi
+            # (Thường do web tự quay lại trang 1 hoặc bị kẹt)
+            if after_size == before_size and p > 1:
+                print(f"⏹️ Phát hiện lặp nội dung ở trang {p}. Có thể đã hết sản phẩm.")
                 break
                 
-            print(f"✅ Trang {p}: Bốc được {len(results)} link. Tổng tích lũy: {after_count}")
+            print(f"✅ Trang {p}: Bốc được {len(results)} link. Tổng tích lũy: {after_size}")
+            p += 1 # Nhảy sang trang tiếp theo
+            
         except Exception as e:
             print(f"⚠️ Lỗi lật trang {p}: {e}")
             break
+            
     return list(all_links)
 
 async def scrape_product_detail(context, url):
