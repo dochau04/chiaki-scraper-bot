@@ -110,16 +110,25 @@ async def main():
             page = await browser.new_page()
             conn = psycopg2.connect(DB_URL)
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 5")    
-            cat = cur.fetchone()
-            if cat:
+            # Master lấy 5 danh mục cùng lúc
+            cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 5")
+            categories = cur.fetchall() # Lấy danh sách 5 mục
+            
+            for cat in categories: # Duyệt qua từng mục để lấy link
                 links = await discover_links(page, cat['url'])
                 if links:
                     data = [(l, cat['category_name']) for l in links]
-                    for i in range(0, len(data), 100):
-                        cur.executemany("INSERT INTO products (url, category_name, status) VALUES (%s, %s, 'pending') ON CONFLICT (url) DO NOTHING", data[i:i+100])
-                    cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
-                    conn.commit()
+                    print(f"📦 Đang nạp {len(data)} link cho mục {cat['category_name']}...")
+                    try:
+                        for i in range(0, len(data), 100):
+                            cur.executemany("INSERT INTO products (url, category_name, status) VALUES (%s, %s, 'pending') ON CONFLICT (url) DO NOTHING", data[i:i+100])
+                        
+                        cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
+                        conn.commit()
+                        print(f"✅ Đã xong mục: {cat['category_name']}")
+                    except Exception as db_err:
+                        print(f"❌ Lỗi DB mục {cat['category_name']}: {db_err}")
+                        conn.rollback()
             cur.close(); conn.close(); await browser.close()
         return
 
