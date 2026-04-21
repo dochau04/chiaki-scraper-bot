@@ -9,53 +9,86 @@ DB_URL = os.environ.get('DATABASE_URL')
 WORKER_ID = os.environ.get('worker_id', '1')
 START_TIME = time.time()
 MAX_RUNTIME = 5.5 * 3600
-CONCURRENCY = 5 
+CONCURRENCY = 3  # Giảm xuống 3 để máy ảo load web kỹ hơn, tránh bị NULL
 
 async def discover_links(page, url):
-    print(f"🔎 [MASTER] Quét danh mục: {url}")
+    print(f"🚀 [MASTER] Đang thu thập link sản phẩm từ: {url}")
+    links = set()
     try:
-        await page.goto(url, wait_until="commit", timeout=60000)
-        found_links = set()
-        for i in range(20): 
-            await page.mouse.wheel(0, 4000)
-            await asyncio.sleep(0.8)
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        await asyncio.sleep(5) 
+        for i in range(20):
             new_links = await page.evaluate('''() => {
-                return Array.from(document.querySelectorAll('.product-item a, .item-product a'))
-                            .map(a => a.href)
-                            .filter(h => h.includes('chiaki.vn/') && !h.includes('tin-tuc'));
+                const selectors = ['.product-item a', '.name-product a', '.item-product a', 'h3 a'];
+                let found = [];
+                selectors.forEach(s => {
+                    document.querySelectorAll(s).forEach(el => {
+                        if (el.href && el.href.includes('chiaki.vn/') && !el.href.includes('tin-tuc')) {
+                            found.push(el.href);
+                        }
+                    });
+                });
+                return found;
             }''')
-            for l in new_links: found_links.add(l)
-            if len(found_links) >= 1000: break
-        return list(found_links)
+            for l in new_links: links.add(l)
+            if len(links) >= 1000: break
+            await page.mouse.wheel(0, 3000)
+            await asyncio.sleep(2)
+            try:
+                load_more = await page.query_selector('text="Xem thêm"')
+                if load_more: await load_more.click(); await asyncio.sleep(3)
+            except: pass
+        return list(links)
     except Exception as e:
-        print(f"❌ Lỗi quét link: {e}"); return []
+        print(f"❌ Lỗi quét danh mục: {e}"); return []
 
 async def scrape_product_detail(context, url):
     page = await context.new_page()
-    await page.route("**/*.{png,jpg,jpeg,gif,css,woff,otf,svg}", lambda route: route.abort())
     try:
-        await page.goto(url, wait_until="commit", timeout=30000)
-        await asyncio.sleep(0.5)
+        # CHUẨN GỐC: Đợi domcontentloaded và scroll để trigger nạp data
+        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        await page.mouse.wheel(0, 1000)
+        await asyncio.sleep(3) # Đợi web render bảng thông số
+
         return await page.evaluate('''() => {
             const getT = (sel) => document.querySelector(sel)?.innerText.trim() || 'N/A';
-            let res = {
-                product_name: getT('h1') || getT('.title-product'),
-                price_sale: document.querySelector('#price-show')?.innerText || '0',
-                price_market: document.querySelector('#sale-price-show')?.innerText || '0',
-                image_link: document.querySelector('.product-img-main img')?.src || 'N/A',
-                brand: 'N/A', origin: 'N/A', stock: '0', sold: '0', kho_hang: 'N/A',
-                description: getT('#content-product')
-            };
+            let res = {};
+
+            // ẢNH SẢN PHẨM
+            let imgEl = document.querySelector('.product-img-main') || 
+                        document.querySelector('.lg-item img') ||
+                        document.querySelector('#product-image-feature');
+            res.image_link = imgEl ? imgEl.getAttribute('src') : 'N/A';
+
+            // TÊN
+            res.product_name = getT('h1') || getT('.title-product');
+
+            // GIÁ
+            let sPrice = document.querySelector('#price-show')?.innerText.replace(/[^0-9]/g, '') || '0';
+            let mPrice = document.querySelector('#sale-price-show')?.innerText.replace(/[^0-9]/g, '') || sPrice;
+            res.price_sale = sPrice;
+            res.price_market = mPrice;
+
+            // THÔNG SỐ ROW (Logic chuẩn của Châu)
+            let stk = '0', brd = 'N/A', ori = 'N/A', wh = 'N/A';
             document.querySelectorAll('.product-specs-row').forEach(row => {
                 let lbl = row.querySelector('.product-specs-label')?.innerText.trim();
                 let val = row.querySelector('.product-specs-value')?.innerText.trim();
-                if (lbl === 'Thương hiệu') res.brand = val;
-                if (lbl === 'Xuất xứ') res.origin = val;
-                if (lbl === 'Số sản phẩm còn lại') res.stock = val;
-                if (lbl === 'Kho hàng tại') res.kho_hang = val;
+                if (lbl === 'Số sản phẩm còn lại') stk = val.replace(/[^0-9]/g, '');
+                if (lbl === 'Thương hiệu') brd = val;
+                if (lbl === 'Xuất xứ') ori = val;
+                if (lbl === 'Kho hàng tại') wh = val;
             });
-            let s = document.querySelector('.item-sold .item-count');
-            if (s) res.sold = s.innerText;
+            res.stock = stk;
+            res.brand = brd;
+            res.origin = ori;
+            res.kho_hang = wh;
+
+            // ĐÃ BÁN & MÔ TẢ
+            let soldEl = document.querySelector('.item-sold .item-count') || document.querySelector('.item-count');
+            res.sold = soldEl ? soldEl.innerText.replace(/[^0-9]/g, '') : '0';
+            res.description = document.querySelector('#content-product')?.innerText.trim() || 'N/A';
+
             return res;
         }''')
     except: return None
@@ -92,11 +125,11 @@ async def main():
     await asyncio.sleep(60) 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
+        context = await browser.new_context(viewport={"width": 1280, "height": 800})
         while time.time() - START_TIME < MAX_RUNTIME:
             conn = psycopg2.connect(DB_URL)
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("UPDATE products SET status = 'processing' WHERE id IN (SELECT id FROM products WHERE status = 'pending' ORDER BY id ASC LIMIT 40 FOR UPDATE SKIP LOCKED) RETURNING id, url;")
+            cur.execute("UPDATE products SET status = 'processing' WHERE id IN (SELECT id FROM products WHERE status = 'pending' ORDER BY id ASC LIMIT 20 FOR UPDATE SKIP LOCKED) RETURNING id, url;")
             jobs = cur.fetchall()
             conn.commit()
             if not jobs:
@@ -115,7 +148,7 @@ async def main():
                         (str(info['product_name']), str(info['price_sale']), str(info['price_market']), str(info['image_link']), str(info['brand']), str(info['origin']), str(info['stock']), str(info['sold']), str(info['description']), str(info['kho_hang']), WORKER_ID, j_id))
                 except: continue
             conn.commit(); cur.close(); conn.close()
-            print(f"🚀 Worker {WORKER_ID} xong 40 link")
+            print(f"✅ Worker {WORKER_ID} cào xong 1 đợt")
         await browser.close()
 
 if __name__ == "__main__":
