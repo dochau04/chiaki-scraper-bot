@@ -13,56 +13,56 @@ CONCURRENCY = 3
 
 async def discover_links(page, category_url):
     all_links = set()
-    # Tăng lên hẳn 50 trang để lấy cho đã Châu nhé
     for p in range(1, 51): 
         url = f"{category_url}?page={p}"
         try:
             print(f"🚀 [MASTER] Đang quét trang {p}: {url}")
-            # Đợi mạng nghỉ (networkidle) để web load xong danh sách SP
+            # Đợi mạng nghỉ hoàn toàn để API sản phẩm load xong
             await page.goto(url, wait_until="networkidle", timeout=60000)
             
-            # Cuộn nhẹ để trigger các thành phần ẩn
-            await page.mouse.wheel(0, 2000)
-            await asyncio.sleep(2)
+            # Cuộn chuột xuống từ từ để "ép" web hiện sản phẩm
+            for _ in range(3):
+                await page.mouse.wheel(0, 2000)
+                await asyncio.sleep(1)
             
-            # Selector cực kỳ tập trung vào vùng chứa sản phẩm
+            # SELECTOR CẢI TIẾN: Chỉ lấy link có chứa cấu trúc sản phẩm của Chiaki
             results = await page.evaluate('''() => {
-                // Chỉ bốc link trong thẻ chứa sản phẩm, loại bỏ menu/footer/sidebar
-                const container = document.querySelector('.list-product') || 
-                                  document.querySelector('#load_data_product') || 
-                                  document.body;
-                
-                return Array.from(container.querySelectorAll('a'))
-                    .map(a => a.href)
-                    .filter(href => {
-                        return href.includes('chiaki.vn/') && 
-                               href.includes('-p-') && // BẮT BUỘC có -p- mới là sản phẩm
-                               !href.includes('tin-tuc') &&
-                               !href.includes('hoi-dap');
+                // Chỉ tập trung vào các thẻ chứa sản phẩm thực sự
+                const productSelectors = [
+                    '.list-product a', 
+                    '.product-item a', 
+                    '#load_data_product a',
+                    '.name-product a'
+                ];
+                let found = [];
+                productSelectors.forEach(sel => {
+                    document.querySelectorAll(sel).forEach(a => {
+                        // CHIẾN THUẬT: Link sản phẩm Chiaki luôn có "-p-" và không phải tin tức
+                        if (a.href.includes('-p-') && !a.href.includes('tin-tuc')) {
+                            found.push(a.href);
+                        }
                     });
+                });
+                return found;
             }''')
             
-            if not results:
-                print(f"⏹️ Trang {p} không có sản phẩm nào. Dừng.")
+            if not results or len(results) == 0:
+                print(f"⏹️ Trang {p} trống rỗng. Dừng.")
                 break
             
-            before_size = len(all_links)
-            for l in results:
-                all_links.add(l)
-            after_size = len(all_links)
+            before_count = len(all_links)
+            for l in results: all_links.add(l)
+            after_count = len(all_links)
             
-            # Nếu sang trang mới mà không thêm được link nào "thực sự mới" 
-            # thì mới coi là trùng và dừng lại
-            if after_size == before_size and p > 1:
-                print(f"⏹️ Trang {p} toàn link đã có. Kết thúc lật trang.")
+            # Chỉ dừng nếu sau khi lọc -p- mà vẫn không có link nào mới
+            if after_count == before_count and p > 1:
+                print(f"⏹️ Trang {p} không có thêm sản phẩm mới. Kết thúc.")
                 break
                 
-            print(f"✅ Trang {p}: Lấy {len(results)} link. Tổng tích lũy: {after_size}")
-            
+            print(f"✅ Trang {p}: Bốc được {len(results)} link. Tổng tích lũy: {after_count}")
         except Exception as e:
-            print(f"⚠️ Lỗi ở trang {p}: {e}")
+            print(f"⚠️ Lỗi lật trang {p}: {e}")
             break
-            
     return list(all_links)
 
 async def scrape_product_detail(context, url):
