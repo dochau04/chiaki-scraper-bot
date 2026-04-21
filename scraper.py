@@ -139,6 +139,7 @@ async def main():
     if not DB_URL: return
     
     # --- PHẦN MASTER (WORKER 1) ---
+# --- PHẦN MASTER (WORKER 1) ---
     if WORKER_ID == '1':
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -148,15 +149,26 @@ async def main():
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
                         cur.execute("SELECT id, url, category_name FROM categories ORDER BY last_scanned ASC NULLS FIRST LIMIT 5")
                         categories = cur.fetchall()
+                        
                         for cat in categories:
-                            links = await discover_links(page, cat['url'])
-                            if links:
-                                data = [(l, cat['category_name']) for l in links]
-                                for i in range(0, len(data), 100):
-                                    cur.executemany("INSERT INTO products (url, category_name, status) VALUES (%s, %s, 'pending') ON CONFLICT (url) DO NOTHING", data[i:i+100])
-                                cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
-                                conn.commit()
-                                print(f"✅ Master nạp xong mục: {cat['category_name']}")
+                            p = 23 # Bắt đầu từ trang Châu muốn
+                            while p <= 250:
+                                links = await discover_links_single_page(page, cat['url'], p) # Tách hàm lấy 1 trang
+                                
+                                if links:
+                                    data = [(l, cat['category_name']) for l in links]
+                                    cur.executemany("INSERT INTO products (url, category_name, status) VALUES (%s, %s, 'pending') ON CONFLICT (url) DO NOTHING", data)
+                                    
+                                    # QUAN TRỌNG: Commit ngay lập tức sau mỗi trang
+                                    conn.commit() 
+                                    print(f"📦 [MASTER] Đã ném {len(links)} link trang {p} vào kho. Worker vào bốc đi!")
+                                    p += 1
+                                else:
+                                    # Nếu 3 trang liên tiếp ko có hàng thì dừng mục này
+                                    break 
+                                    
+                            cur.execute("UPDATE categories SET last_scanned = NOW() WHERE id = %s", (cat['id'],))
+                            conn.commit()
             except Exception as e:
                 print(f"❌ Master lỗi: {e}")
                 if 'conn' in locals(): conn.rollback()
